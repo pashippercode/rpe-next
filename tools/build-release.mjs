@@ -9,6 +9,9 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve, basename, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractReleaseZip, verifyReleaseSourceDirectory, verifyReleaseSourceZip } from './release-source.mjs';
+import { EDITOR_PACKAGE_SOURCES, SERVER_PACKAGE_SOURCES } from './package-sources.mjs';
+import { macOSAdHocSignOptions, verifyMacOSAdHocSigning } from './macos-signing.mjs';
+import { prepareUpdatePackage } from '../desktop/update-package.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const kind = process.argv.includes('--server') ? 'server' : 'editor';
@@ -16,13 +19,7 @@ const platform = process.platform, arch = process.arch;
 if (!['win32', 'darwin', 'linux'].includes(platform) || !['x64', 'arm64'].includes(arch)) throw Error('Release builds require Windows, macOS or Linux on x64/ARM64');
 const metadata = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-const tracked = ['desktop', 'src/core', 'src/application', 'src/platform', 'src/ui', 'assets', 'index.html', 'styles.css', 'LICENSE', 'NOTICE',
-  'protocols/EDITOR-SKIN-PROTOCOL.zh-CN.md', 'protocols/MOD-PROTOCOL.zh-CN.md', 'protocols/GLOBAL-EVENTS-PROTOCOL.zh-CN.md', 'protocols/AI-AGENT-PROTOCOL.zh-CN.md', 'protocols/AUDIO-SEPARATION.zh-CN.md', 'protocols/CHART-VERSION-CONTROL.zh-CN.md', 'schemas',
-  'tools/smoke-mods.mjs', 'tools/smoke-native.mjs', 'tools/smoke-asset-library.mjs', 'tools/smoke-settings-renderer.js', 'tools/smoke-saving.mjs', 'tools/smoke-agent.mjs', 'tools/smoke-agent-upgrade.mjs', 'tools/smoke-audio.mjs'];
-const serverFiles = ['collaboration-server/server.mjs', 'collaboration-server/asset-store.mjs', 'collaboration-server/manager.cjs',
-  'collaboration-server/diagnostics.cjs', 'collaboration-server/preload.cjs', 'collaboration-server/manager.html',
-  'collaboration-server/manager.css', 'collaboration-server/manager.js', 'collaboration-server/README.md', 'src/core', 'LICENSE', 'NOTICE'];
-const sourcePaths = kind === 'server' ? serverFiles : tracked;
+const sourcePaths = kind === 'server' ? SERVER_PACKAGE_SOURCES : EDITOR_PACKAGE_SOURCES;
 execFileSync('git', ['diff', '--exit-code', 'HEAD', '--', 'package.json', ...sourcePaths], { cwd: root, stdio: 'pipe' });
 const platformName = { win32: 'windows', darwin: 'macos', linux: 'linux' }[platform];
 const product = kind === 'server' ? 'RePhiEdit Collaboration Server' : 'RePhiEdit Next';
@@ -94,7 +91,8 @@ const packaged = await packager({
   appBundleId: kind === 'server' ? 'io.github.kclg-ysj.rpe-next.server' : 'io.github.kclg-ysj.rpe-next',
   appCopyright: 'Copyright 2026 cmdysj', prune: false, asar: false, overwrite: false,
   darwinDarkModeSupport: true,
-  ...(platform === 'darwin' ? { osxSign: { identity: '-', identityValidation: false, continueOnError: false } } : {}),
+  ...(kind === 'editor' && platform === 'darwin' ? { extendInfo: { NSMicrophoneUsageDescription: '按住语音输入快捷键时，在本机识别麦克风音频并填入文本框。Microphone audio is transcribed locally while the dictation key is held.' } } : {}),
+  ...(platform === 'darwin' ? { osxSign: macOSAdHocSignOptions() } : {}),
   afterExtract: [async ({ buildPath }) => trimLocales(buildPath)]
 });
 if (packaged.length !== 1) throw Error('Unexpected package count');
@@ -109,10 +107,13 @@ if (platform === 'linux') args.push('--no-sandbox');
 if (platform === 'darwin') args.push('--use-angle=metal', '--ignore-gpu-blocklist');
 else args.push('--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
 console.log('Testing packaged application: ' + platform + '/' + arch + ' ' + kind);
-const smoke = await run(executable, args, { env: { ...process.env, RPE_NATIVE_TEST_HOME: join(work, 'test-profile') }, timeout: platform === 'darwin' && arch === 'x64' ? 480000 : 240000 });
-if (kind === 'editor' ? !smoke.includes('"errors":[]') || !smoke.includes('real native IPC opens image parent') : !smoke.includes('"protocol":1') || !smoke.includes('"errors":[]')) throw Error('Packaged smoke result is incomplete');
-if (kind === 'editor' && !smoke.includes('built-in note skin files and images load through the packaged application protocol')) throw Error('Built-in note skin check is missing');
-if (platform === 'darwin') execFileSync('codesign', ['--verify', '--deep', '--strict', bundle]);
+async function smokeApplication(path, profile) {
+  const smoke = await run(path, args, { env: { ...process.env, RPE_NATIVE_TEST_HOME: profile }, timeout: platform === 'darwin' && arch === 'x64' ? 480000 : 240000 });
+  if (kind === 'editor' ? !smoke.includes('"errors":[]') || !smoke.includes('real native IPC opens image parent') : !smoke.includes('"protocol":1') || !smoke.includes('"errors":[]')) throw Error('Packaged smoke result is incomplete');
+  if (kind === 'editor' && !smoke.includes('built-in note skin files and images load through the packaged application protocol')) throw Error('Built-in note skin check is missing');
+}
+if (platform === 'darwin') await verifyMacOSAdHocSigning(bundle);
+await smokeApplication(executable, join(work, 'test-profile'));
 
 const help = [
   product + ' ' + metadata.version, '',
@@ -127,7 +128,7 @@ const help = [
   'Source commit: ' + sourceCommit, ''
 ].join('\n');
 await mkdir(output, { recursive: true });
-let archive;
+let archive, macOSVerification;
 if (platform === 'darwin') {
   const image = join(work, 'disk-image'); await mkdir(image);
   await cp(bundle, join(image, basename(bundle)), { recursive: true, dereference: false, verbatimSymlinks: true });
@@ -145,6 +146,20 @@ if (platform === 'darwin') {
     }
   }
   await run('hdiutil', ['verify', archive]);
+  // Test what users install, including the framework symlinks and the actual
+  // signed entitlements after both the DMG and application copy operations.
+  const mount = join(work, 'mounted-image'), installed = join(work, 'installed', basename(bundle));
+  await mkdir(mount);
+  await run('hdiutil', ['attach', '-readonly', '-nobrowse', '-mountpoint', mount, archive]);
+  try {
+    await run('ditto', [join(mount, basename(bundle)), installed]);
+  } finally {
+    await run('hdiutil', ['detach', mount]);
+  }
+  await verifyReleaseSourceDirectory(root, sourceCommit, sourcePaths, join(installed, 'Contents/Resources/app'));
+  const signedProcesses = await verifyMacOSAdHocSigning(installed);
+  await smokeApplication(join(installed, 'Contents/MacOS', executableName), join(work, 'installed-test-profile'));
+  macOSVerification = { signedProcesses, installedFromDmg: true };
 } else {
   await writeFile(join(directory, '使用说明.txt'), '\uFEFF' + help);
   if (platform === 'win32') {
@@ -168,6 +183,16 @@ if (platform === 'darwin') {
 }
 const digest = createHash('sha256'); for await (const chunk of createReadStream(archive)) digest.update(chunk);
 const bytes = (await stat(archive)).size;
-const manifest = { ...buildInfo, file: basename(archive), bytes, sha256: digest.digest('hex'), unpackedBytes: await directoryBytes(directory), removedLocaleBytes, sourceFilesVerified, verified: true };
+const sha256 = digest.digest('hex');
+let updateVerification;
+if (kind === 'editor') {
+  const prepared = await prepareUpdatePackage({ archive, sha256, release: { version: metadata.version }, platform, arch, output: join(work, 'update-verification') });
+  const application = join(prepared.source, platform === 'darwin' ? 'Contents/Resources/app' : 'resources/app');
+  await verifyReleaseSourceDirectory(root, sourceCommit, sourcePaths, application);
+  const installedExecutable = join(prepared.source, platform === 'darwin' ? 'Contents/MacOS/RePhiEdit-Next' : platform === 'win32' ? 'RePhiEdit-Next.exe' : 'RePhiEdit-Next');
+  await smokeApplication(installedExecutable, join(work, 'update-test-profile'));
+  updateVerification = { packagePrepared: true, sourceVerified: true, applicationStarts: true };
+}
+const manifest = { ...buildInfo, file: basename(archive), bytes, sha256, unpackedBytes: await directoryBytes(directory), removedLocaleBytes, sourceFilesVerified, verified: true, ...(macOSVerification ? { macOSVerification } : {}), ...(updateVerification ? { updateVerification } : {}) };
 await writeFile(join(output, stem + '.json'), JSON.stringify(manifest, null, 2) + '\n');
 console.log(JSON.stringify(manifest));

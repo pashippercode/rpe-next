@@ -1,10 +1,11 @@
 import { beatValue } from './beat.mjs';
 import { easing } from './easing.mjs';
 import { trajectoryEventValue } from './curve-trajectory.mjs';
+import { t } from '../i18n.mjs';
 
 export const SPECIAL_TRACKS = [
-  { key: 'scaleXEvents', label: '缩放 X' }, { key: 'scaleYEvents', label: '缩放 Y' },
-  { key: 'colorEvents', label: '颜色' }, { key: 'paintEvents', label: '着色器' }, { key: 'textEvents', label: '文字' },
+  { key: 'scaleXEvents', label: t('editor-display.s4175cf1') }, { key: 'scaleYEvents', label: t('editor-display.sd55daa9') },
+  { key: 'colorEvents', label: t('editor-display.s8ef4886') }, { key: 'paintEvents', label: t('editor-display.s14f807e') }, { key: 'textEvents', label: t('editor-display.sf4d3dab') },
 ];
 export const MAX_BASE_LAYERS = 4;
 
@@ -14,6 +15,12 @@ export function previewViewport(width, height, ratio = 1.5) {
   const scale = Math.min(width / logicalWidth, height / logicalHeight);
   return { scale, width: logicalWidth * scale, height: logicalHeight * scale,
     left: (width - logicalWidth * scale) / 2, top: (height - logicalHeight * scale) / 2 };
+}
+
+export function previewDefaultFrame(viewport, divisor) {
+  if (!(divisor > 1)) return null;
+  const width = viewport.width / divisor, height = viewport.height / divisor;
+  return { left: viewport.left + (viewport.width - width) / 2, top: viewport.top + (viewport.height - height) / 2, width, height };
 }
 
 export function overflowTextureSize(width, height, pixelRatio, blur, filterRadius = 8) {
@@ -54,8 +61,8 @@ export function eventChains(events) {
   return groups;
 }
 
-export function simultaneousNotes(chart, tempo) {
-  const counts = new Map(); const times = new Map();
+export function simultaneousNotes(chart, tempo, counts = new Map()) {
+  counts.clear(); const times = new Map();
   for (const line of chart.judgeLineList ?? []) for (const note of line.notes ?? []) {
     const time = Math.round(tempo.seconds(note.startTime, line.bpmfactor ?? 1) * 1000000);
     times.set(note, time); counts.set(time, (counts.get(time) ?? 0) + 1);

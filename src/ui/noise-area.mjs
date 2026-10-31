@@ -1,4 +1,4 @@
-import { createNoiseArea, createNoiseEvent, noiseCenter, noiseHasAnchor, noiseRuntime, NOISE_TRACKS, withNoiseAreas, shiftNoiseArea } from '../core/noise-areas.mjs';
+import { createNoiseArea, createNoiseEvent, noiseCenter, noiseHasAnchor, noiseRuntime, noiseActivationIntervals, NOISE_TRACKS, withNoiseAreas, shiftNoiseArea } from '../core/noise-areas.mjs';
 import { samplingTarget, sampleEditingArea, noiseSampleHandle, applyNoiseSample, fitNoiseSampleView } from '../core/noise-sampling.mjs';
 import { beatValue, fromNumber, parseBeat, formatBeat } from '../core/beat.mjs';
 import { previewViewport, previewPositionScale, strokeIntersects } from '../core/editor-display.mjs';
@@ -13,6 +13,9 @@ import { evaluateEventNumber } from '../core/numeric-expression.mjs';
 import { numericExpressionSource, setNumericExpressionResolver } from './numeric-expression-input.mjs';
 import { intervalSelection, extendIntervalSelection } from '../core/selection-interval.mjs';
 import { IntervalIndex } from '../core/interval-index.mjs';
+import { drawEditorJudgement, editorJudgementWidth } from './editor-judgement.mjs';
+import { dragEventEndpoint } from '../core/event-drag.mjs';
+import { t } from '../i18n.mjs';
 
 function button(text, title, run) {
   const control = document.createElement('button'); control.type = 'button'; control.textContent = text; control.title = title; control.onclick = run; return control;
@@ -36,7 +39,7 @@ export class NoiseAreaEditor {
     this.layerPanel = new NoiseLayerPanel(this);
     this.modeHeader = document.createElement('span'); this.modeHeader.className = 'noise-mode-head'; this.modeHeader.hidden = true;
     this.modePrimary = document.createElement('span'); this.modePrimary.className = 'noise-mode-primary';
-    const modeTitle = document.createElement('strong'); modeTitle.textContent = '噪域编辑';
+    const modeTitle = document.createElement('strong'); modeTitle.textContent = t('noise-area.s0f8a536');
     this.modeCount = document.createElement('small'); this.modeCount.className = 'noise-mode-count'; this.modeOwner = document.createElement('span'); this.modeOwner.className = 'noise-mode-owner';
     this.modePrimary.append(modeTitle, this.modeCount, this.modeOwner);
     const spacer = document.createElement('span'); spacer.className = 'noise-mode-spacer';
@@ -46,10 +49,10 @@ export class NoiseAreaEditor {
     document.querySelector('.timeline-head').append(this.modeHeader);
     this.overlay = document.createElement('canvas'); this.overlay.className = 'noise-sampler'; this.overlay.hidden = true; canvas.closest('.stage').append(this.overlay);
     this.sampleBar = document.createElement('div'); this.sampleBar.className = 'noise-sample-bar'; this.sampleBar.hidden = true;
-    this.sampleBar.append(hint('拖动绿色控制点 · 可连续取样，完成统一应用 · Esc 全部取消'), button('完成取样', '保留全部取样结果并返回时间轴', () => this.endSample(true)), button('取消', '放弃全部取样修改', () => this.endSample(false))); canvas.closest('.stage').append(this.sampleBar);
+    this.sampleBar.append(hint(t('noise-area.s5cb983c')), button(t('noise-area.s2e0df4a'), t('noise-area.s419c38c'), () => this.endSample(true)), button(t('noise-area.s4d0b468'), t('noise-area.s38d6600'), () => this.endSample(false))); canvas.closest('.stage').append(this.sampleBar);
     for (const [name, handler] of [['pointerdown', event => this.down(event)], ['pointermove', event => this.move(event)], ['pointerup', event => this.up(event)], ['pointercancel', () => this.cancelGesture()]]) canvas.addEventListener(name, handler);
     canvas.addEventListener('wheel', event => { event.preventDefault(); event.stopPropagation(); if (!this.sampleMode) { this.wheel(event); this.cursor = this.point(event); this.updateDrag(); } }, { passive: false });
-    canvas.addEventListener('contextmenu', event => { event.preventDefault(); this.pending = null; this.onContextMenu?.(event); this.invalidate(); });
+    canvas.addEventListener('contextmenu', event => { event.preventDefault(); if (this.suppressContextMenu || this.drag?.endpoint) { this.suppressContextMenu = false; event.stopImmediatePropagation?.(); return; } this.pending = null; this.onContextMenu?.(event); this.invalidate(); });
     canvas.addEventListener('auxclick', event => event.preventDefault());
     this.overlay.addEventListener('pointerdown', event => this.sampleDown(event));
     this.overlay.addEventListener('pointermove', event => this.sampleMove(event));
@@ -75,8 +78,8 @@ export class NoiseAreaEditor {
   syncChrome() {
     document.querySelector('.editor').classList.toggle('noise-mode', this.active);
     setProperty(this.modeHeader, 'hidden', !this.active);
-    setProperty(this.modeCount, 'textContent', `噪域数量 ${this.areas().length}`);
-    setProperty(this.modeOwner, 'textContent', this.area() ? `#${this.selected} ${this.area().Name || '未命名噪域'}` : '未指定噪域');
+    setProperty(this.modeCount, 'textContent', t('noise-area.s5d85ca8', { p0: this.areas().length }));
+    setProperty(this.modeOwner, 'textContent', this.area() ? `#${this.selected} ${this.area().Name || '未命名噪域'}` : t('noise-area.sd7b34fd'));
     if (this.active && !this.canvas.hidden) {
       const layout = this.layout();
       const columns = `${layout.split}px 30px repeat(${NOISE_TRACKS.length}, ${layout.eventWidth}px) 10px`;
@@ -89,7 +92,7 @@ export class NoiseAreaEditor {
     setProperty(document.querySelector('#mirror'), 'disabled', this.active);
     setProperty(document.querySelector('#batch-run'), 'disabled', this.active || !this.context.session.selection.size);
     setProperty(document.querySelector('#notes-only'), 'disabled', this.active || this.context.session.multiLineActive);
-    setProperty(document.querySelector('#selection-info'), 'textContent', this.active ? `${this.selection.size} 个噪域${this.event || [...this.selection].some(key => !key.startsWith('area:')) ? '内部事件' : ''}已选` : this.context.session.focus === 'events' ? `${this.context.session.eventSelection.size} 个事件已选` : `${this.context.session.selection.size} 个音符已选`);
+    setProperty(document.querySelector('#selection-info'), 'textContent', this.active ? t('noise-area.s9b7b953', { p0: this.selection.size, p1: this.event || [...this.selection].some(key => !key.startsWith('area:')) ? t('noise-area.s02d2cee') : '' }) : this.context.session.focus === 'events' ? t('noise-area.sdd39156', { p0: this.context.session.eventSelection.size }) : t('noise-area.s94b23eb', { p0: this.context.session.selection.size }));
     if (!this.sampleMode) setProperty(document.querySelector('#realtime-preview'), 'hidden', !this.context.realtimePreview.visible);
   }
   report(error) { this.notify(error.message, 'error'); }
@@ -126,7 +129,7 @@ export class NoiseAreaEditor {
   flush() {
     if (!this.draftChart || this.sampleMode) return;
     const chart = this.draftChart; this.draftChart = null; this.formCommitting = true;
-    try { this.commit('编辑噪域属性', chart); } catch (error) { this.report(error); }
+    try { this.commit(t('noise-area.saf782f6'), chart); } catch (error) { this.report(error); }
     finally { this.formCommitting = false; }
     this.render(); this.invalidate();
   }
@@ -140,15 +143,15 @@ export class NoiseAreaEditor {
   }
   add(start, end, horizontal) {
     const areas = [...this.areas(), { ...createNoiseArea(start, end), layerId: noiseLayers(this.chart)[0].id, editorPositionX: this.editorX(horizontal) }]; const index = areas.length - 1;
-    if (this.commitAreas('添加噪域', areas)) this.select(index);
+    if (this.commitAreas(t('noise-area.sea27c43'), areas)) this.select(index);
   }
   addEvent(type, start, end, hooked = false) {
-    const area = this.area(); if (!area) { this.notify('先在左侧选择一个噪域', 'warning'); return; }
+    const area = this.area(); if (!area) { this.notify(t('noise-area.s0c2a653'), 'warning'); return; }
     const sample = noiseRuntime(area, this.context.tempo).sample(this.context.tempo.seconds(start));
     const value = sample.values[type]?.value ?? 0;
     const event = type === 'activeIntervals' ? { startTime: fromNumber(start), endTime: fromNumber(end), readyFlash: 0.5 } : { ...createNoiseEvent(value, value, start, end, noiseHasAnchor(type) ? sample.values[type]?.event?.anchor ?? noiseCenter(area) : undefined), inst: hooked ? 1 : 0 };
     const events = [...(area[type] ?? []), event]; const areas = this.areas().map((entry, index) => index === this.selected ? { ...entry, [type]: events } : entry);
-    if (this.commitAreas('放置噪域' + NOISE_TRACKS.find(track => track[0] === type)[1], areas)) this.select(this.selected, { type, index: events.length - 1 });
+    if (this.commitAreas(t('noise-area.s074f6c7') + NOISE_TRACKS.find(track => track[0] === type)[1], areas)) this.select(this.selected, { type, index: events.length - 1 });
   }
   remove() {
     const keys = this.selection;
@@ -156,7 +159,7 @@ export class NoiseAreaEditor {
     let areas = this.areas();
     if ([...keys].some(key => key.startsWith('area:'))) { areas = areas.filter((area, index) => !keys.has('area:' + index)); this.selected = -1; }
     else if (this.area()) areas = areas.map((area, index) => index === this.selected ? { ...area, ...Object.fromEntries(NOISE_TRACKS.map(([type]) => [type, (area[type] ?? []).filter((event, eventIndex) => !keys.has(type + ':' + eventIndex))])) } : area);
-    this.selection.clear(); this.event = null; this.commitAreas('删除噪域对象', areas);
+    this.selection.clear(); this.event = null; this.commitAreas(t('noise-area.s61bcef5'), areas);
     if (this.selected === -1) this.activate('noise');
   }
   copy(cut = false) {
@@ -168,7 +171,7 @@ export class NoiseAreaEditor {
     if (!entries.length) return;
     this.clipboard = { entries, start: Math.min(...entries.map(entry => beatValue(entry.value[entry.type === 'area' ? 'appearTime' : 'startTime']))) };
     if (cut) this.remove();
-    this.notify(cut ? '已剪切噪域对象' : '已复制噪域对象', 'success'); this.invalidate();
+    this.notify(cut ? t('noise-area.sff296eb') : t('noise-area.se204bc7'), 'success'); this.invalidate();
   }
   pastedAreas(at, keepTime = false) {
     const areas = [...this.areas()]; const delta = keepTime ? 0 : at - this.clipboard.start;
@@ -180,7 +183,7 @@ export class NoiseAreaEditor {
         areas.push({ ...shiftNoiseArea(entry.value, delta), layerId: layers.some(layer=>layer.id===sourceLayer) ? sourceLayer : layers[0].id, editorPositionX: Math.max(-675, Math.min(675, entry.value.editorPositionX + deltaX)) });
       }
       else {
-        if (!areas[this.selected]) throw new Error('请先选择接收事件的噪域');
+        if (!areas[this.selected]) throw new Error(t('noise-area.s1186146'));
         const area = areas[this.selected]; const value = { ...structuredClone(entry.value), startTime: fromNumber(beatValue(entry.value.startTime) + delta), endTime: fromNumber(beatValue(entry.value.endTime) + delta) };
         areas[this.selected] = { ...area, [entry.type]: [...(area[entry.type] ?? []), value] };
       }
@@ -197,7 +200,7 @@ export class NoiseAreaEditor {
     else if (['Delete', 'QuickDelete'].includes(action)) this.remove();
     else if (['Paste', 'KeepTimePaste', 'PasteMirror', 'KeepTimePasteMirror'].includes(action)) {
       if (this.clipboard) {
-        try { this.commitAreas('粘贴噪域对象', this.pastedAreas(this.cursor?.beat ?? this.context.timeline.origin, action.startsWith('KeepTime'))); } catch (error) { this.report(error); }
+        try { this.commitAreas(t('noise-area.see88999'), this.pastedAreas(this.cursor?.beat ?? this.context.timeline.origin, action.startsWith('KeepTime'))); } catch (error) { this.report(error); }
       }
     } else if (action === 'SelectAll') {
       this.selection = new Set(this.cursor?.side === 'events' && this.area() ? NOISE_TRACKS.flatMap(([type]) => (this.area()[type] ?? []).map((entry, index) => type + ':' + index)) : this.areas().map((area,index) => 'area:' + index)); this.render();
@@ -239,9 +242,19 @@ export class NoiseAreaEditor {
   }
   editorX(horizontal) { return Math.max(-675, Math.min(675, ((horizontal - AREA_BAR_WIDTH / 2) / Math.max(1, this.layout().split - AREA_BAR_WIDTH) - 0.5) * 1350)); }
   areaX(area, index) { const position = Number.isFinite(area.editorPositionX) ? area.editorPositionX : -540 + index % 6 * 216; return AREA_BAR_WIDTH / 2 + (position / 1350 + 0.5) * Math.max(1, this.layout().split - AREA_BAR_WIDTH); }
+  diagnosticBounds(index, type, eventIndex) {
+    const area = this.areas()[index], event = type ? area?.[type]?.[eventIndex] : area; if (!event) return null;
+    const head = this.y(beatValue(type ? event.startTime : area.appearTime)), tail = this.y(beatValue(type ? event.endTime : area.disappearTime));
+    const bounds = type ? this.eventBounds(type) : { x: this.areaX(area, index) - AREA_BAR_WIDTH / 2, width: AREA_BAR_WIDTH };
+    return { canvas: this.canvas, ...bounds, y: Math.min(head, tail) - 2, height: Math.max(8, Math.abs(tail - head) + 4) };
+  }
   hit(point) { return this.rects.findLast(rect => Boolean(rect.type) === (point.side === 'events') && point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= Math.max(HEADER_HEIGHT, rect.y - 5) && point.y <= rect.y + rect.height + 5); }
-  hitKind(rect, point) { return Math.abs(point.y - rect.head) <= 7 ? 'start' : Math.abs(point.y - rect.tail) <= 7 ? 'end' : 'move'; }
-  syncHover() { const hit = this.cursor && this.hit(this.cursor); this.hover = hit ? { ...hit, kind: this.hitKind(hit, this.cursor) } : null; this.canvas.style.cursor = this.drag && ['move', 'start', 'end'].includes(this.drag.kind) ? this.drag.kind === 'move' ? 'grabbing' : 'ns-resize' : this.hover ? this.hover.kind === 'move' ? 'grab' : 'ns-resize' : 'default'; }
+  endpointTarget(point = this.cursor) {
+    if (point?.side !== 'events' || this.context.timeline.rpeEventDrag !== true || !this.context.timeline.eventEndpointDragHeld || this.selection.size !== 1 || this.pending) return null;
+    const [type, index] = [...this.selection][0].split(':'); return type !== 'area' && this.area()?.[type]?.[index] ? { type, index: Number(index) } : null;
+  }
+  hitKind(rect, point) { return rect.type && this.context.timeline.rpeEventDrag === true ? 'move' : Math.abs(point.y - rect.head) <= 7 ? 'start' : Math.abs(point.y - rect.tail) <= 7 ? 'end' : 'move'; }
+  syncHover() { const hit = this.cursor && this.hit(this.cursor); this.hover = hit ? { ...hit, kind: this.hitKind(hit, this.cursor) } : null; this.canvas.style.cursor = this.drag?.endpoint || this.endpointTarget() ? 'ns-resize' : this.drag && ['move', 'start', 'end'].includes(this.drag.kind) ? this.drag.kind === 'move' ? 'grabbing' : 'ns-resize' : this.hover ? this.hover.kind === 'move' ? 'grab' : 'ns-resize' : 'default'; }
   y(beat) { const { timeline, tempo } = this.context; return this.layout().height - timeline.judgementOffset - (tempo.seconds(beat) - tempo.seconds(timeline.origin)) * timeline.scale; }
   beatAt(vertical, snap = true) {
     const { timeline, tempo } = this.context;
@@ -265,9 +278,16 @@ export class NoiseAreaEditor {
     this.invalidate();
   }
   down(event) {
-    if (event.button !== 0 && event.button !== 1) return;
-    if (this.point(event).y < HEADER_HEIGHT) return;
+    if (![0, 1, 2].includes(event.button)) return;
+    const point = this.point(event), endpoint = [0, 2].includes(event.button) && this.endpointTarget(point);
+    if (point.y < HEADER_HEIGHT || event.button === 2 && !endpoint) return;
     event.preventDefault(); event.stopPropagation(); this.flush(); this.pause(); this.cursor = this.point(event); this.canvas.focus();
+    this.suppressContextMenu = false;
+    if (endpoint) {
+      this.canvas.setPointerCapture(event.pointerId); this.event = endpoint; this.activate('noise-properties');
+      this.drag = { kind: event.button === 0 ? 'start' : 'end', endpoint: true, start: this.cursor, hit: endpoint, base: this.context.session.chart, keys: new Set(this.selection), moved: false };
+      this.suppressContextMenu = event.button === 2; this.syncHover(); this.invalidate(); return;
+    }
     if (this.drag?.kind === 'rectangle') { this.up(event, true); return; }
     this.canvas.setPointerCapture(event.pointerId);
     const hit = this.hit(this.cursor);
@@ -294,6 +314,7 @@ export class NoiseAreaEditor {
   updateDrag() {
     this.syncHover();
     if (!this.drag) { this.invalidate(); return; }
+    if (this.drag.endpoint && !this.context.timeline.eventEndpointDragHeld) { this.invalidate(); return; }
     const drag = this.drag; const previous = drag.current ?? drag.start; drag.current = this.cursor;
     drag.moved ||= Math.hypot(this.cursor.x - drag.start.x, this.cursor.y - drag.start.y) > 4;
     if (drag.kind === 'stroke' && drag.moved) {
@@ -312,7 +333,8 @@ export class NoiseAreaEditor {
       const [type, rawIndex] = key.split(':'); const index = Number(rawIndex);
       const entry = type === 'area' ? areas[index] : areas[this.selected]?.[type]?.[index]; if (!entry) continue;
       const startKey = type === 'area' ? 'appearTime' : 'startTime'; const endKey = type === 'area' ? 'disappearTime' : 'endTime';
-      if (drag.kind === 'move') {
+      if (drag.endpoint) Object.assign(entry, dragEventEndpoint(entry, drag.kind === 'start' ? 'startTime' : 'endTime', this.cursor.beat));
+      else if (drag.kind === 'move') {
         if (type === 'area') areas[index] = { ...shiftNoiseArea(entry, delta), editorPositionX: this.editorX(this.areaX(entry, index) + this.cursor.x - drag.start.x) };
         else { entry[startKey] = fromNumber(beatValue(entry[startKey]) + delta); entry[endKey] = fromNumber(beatValue(entry[endKey]) + delta); }
       } else if (key === (drag.hit.type ? drag.hit.type + ':' + drag.hit.index : 'area:' + drag.hit.index)) {
@@ -351,6 +373,7 @@ export class NoiseAreaEditor {
   cancelGesture() { this.drag = null; this.pending = null; this.draftChart = null; this.dragError = null; this.invalidate(); }
   autoScroll(elapsed) {
     if (!this.active || !this.drag || !this.cursor || this.sampleMode) return;
+    if (this.drag.endpoint && !this.context.timeline.eventEndpointDragHeld) return;
     const { height } = this.layout(); const edge = this.cursor.y < 30 ? 1 : this.cursor.y > height - 20 ? -1 : 0;
     if (edge) { const { tempo, timeline } = this.context; const beat = tempo.beat(tempo.seconds(timeline.origin) + edge * elapsed); this.seek(beat); timeline.origin = beat; this.cursor = { ...this.cursor, beat: this.beatAt(this.cursor.y), rawBeat: this.beatAt(this.cursor.y, false) }; this.updateDrag(); }
   }
@@ -363,12 +386,12 @@ export class NoiseAreaEditor {
       this.listTitle = document.createElement('div'); this.listTitle.className = 'panel-title'; this.host.append(this.listTitle);
       this.host.append(this.layerPanel.element);
       const actions = document.createElement('div'); actions.className = 'noise-actions';
-      actions.append(button('关闭编辑', '返回音符与事件编辑区', () => this.close())); this.host.append(actions);
-      this.host.append(hint('Q / R 两次定位放置。拖动首尾调整时间，拖动身体整体移动；左侧窄条可自由横向排布。Shift / 中键框选，空白处按住左键划线多选；Ctrl+C/X/V 复制、剪切、粘贴。'));
+      actions.append(button(t('noise-area.s173f9e5'), t('noise-area.s3b961ca'), () => this.close())); this.host.append(actions);
+      this.host.append(hint(t('noise-area.s7b9bcf4')));
       this.host.append(this.areaList.element);
     }
     this.layerPanel.render();
-    const listTitle = '噪域 · ' + this.areas().length;
+    const listTitle = t('noise-area.s54cdbff') + this.areas().length;
     if (this.listTitle.textContent !== listTitle) this.listTitle.textContent = listTitle;
     this.areaList.update(this.areas(), this.selected);
     const signature = `${this.selected}/${this.event?.type}/${this.event?.index}`;
@@ -393,51 +416,51 @@ export class NoiseAreaEditor {
     input.step = kind === 'number' ? 'any' : String(step);
     const movementExpression = sample?.type === 'moveYEvents' && ['start', 'end'].includes(sample.field);
     const evaluateMovement = source => evaluateEventNumber(source, { type: sample.type, field: sample.field, event: this.area()[sample.type][sample.index], tempo: this.context.tempo });
-    if (movementExpression) { setNumericExpressionResolver(input, evaluateMovement); input.title = '支持表达式；nv 由另一端数值与时长计算速度为 n 时的位移'; }
+    if (movementExpression) { setNumericExpressionResolver(input, evaluateMovement); input.title = t('noise-area.s61fd280'); }
     const read = () => kind === 'checkbox' ? input.checked : kind === 'beat' ? parseBeat(input.value) : kind === 'text' ? input.value : movementExpression && String(numericExpressionSource(input)).trim().endsWith('v') ? evaluateMovement(numericExpressionSource(input)) : (input.value.trim() ? Number(input.value) : NaN);
-    input.oninput = () => { try { const valid = this.edit(area => apply(area, read()), false); input.setCustomValidity(valid ? '' : '数值无效或事件重叠'); } catch (error) { input.setCustomValidity(error.message); } };
+    input.oninput = () => { try { const valid = this.edit(area => apply(area, read()), false); input.setCustomValidity(valid ? '' : t('noise-area.s615582b')); } catch (error) { input.setCustomValidity(error.message); } };
     input.onchange = () => { input.oninput(); if (input.checkValidity()) this.flush(); else this.notify(input.validationMessage, 'error'); };
     if (kind === 'number' || kind === 'duration' || kind === 'beat') {
       input.addEventListener('wheel', event => { event.preventDefault(); event.stopPropagation(); try { const increment = kind === 'beat' ? 1 / this.context.timeline.division : kind === 'duration' ? 0.001 : step; const current = kind === 'beat' ? beatValue(read()) : Number(input.value); const next = current + (event.deltaY < 0 ? increment : -increment); input.value = kind === 'beat' ? formatBeat(fromNumber(next)) : kind === 'duration' ? durationText(next) : round(next); input.onchange(); } catch (error) { this.report(error); } }, { passive: false });
     }
     controls.append(input);
-    if (sample) controls.append(button('⌖', '在预览中拖动取样：' + labelText, () => this.beginSample(sample)));
-    if (clear) controls.append(button('×', '关闭预备闪烁', () => { input.value = '0'; input.onchange(); }));
-    if (kind === 'beat') { const nudges = document.createElement('span'); nudges.className = 'noise-beat-nudges'; for (const [text, direction] of [['▴', 1], ['▾', -1]]) nudges.append(button(text, '调整一横线', () => { try { input.value = formatBeat(fromNumber(beatValue(read()) + direction / this.context.timeline.division)); input.onchange(); } catch (error) { this.report(error); } })); controls.append(nudges); }
+    if (sample) controls.append(button('⌖', t('noise-area.scea01d0') + labelText, () => this.beginSample(sample)));
+    if (clear) controls.append(button('×', t('noise-area.sb14037f'), () => { input.value = '0'; input.onchange(); }));
+    if (kind === 'beat') { const nudges = document.createElement('span'); nudges.className = 'noise-beat-nudges'; for (const [text, direction] of [['▴', 1], ['▾', -1]]) nudges.append(button(text, t('noise-area.s2b60c30'), () => { try { input.value = formatBeat(fromNumber(beatValue(read()) + direction / this.context.timeline.division)); input.onchange(); } catch (error) { this.report(error); } })); controls.append(nudges); }
     label.append(controls); host.append(label); return input;
   }
   renderProperties(host = this.properties) {
     host.replaceChildren();
-    host.append(button('← 噪域列表', '返回噪域管理', () => this.activate('noise')));
-    const area = this.area(); if (!area) { host.append(hint('请在左侧选择噪域。')); return; }
-    const title = document.createElement('h3'); title.textContent = this.event ? NOISE_TRACKS.find(track => track[0] === this.event.type)[1] + ' · 噪域 ' + this.selected : '噪域 ' + this.selected; host.append(title);
-    this.field(host, '所属噪域层', noiseLayerId(area), (item,value) => ({ ...item, layerId:value }), { kind:'text', choices:noiseLayers(this.chart).map(layer=>[layer.id,layer.name]) });
+    host.append(button(t('noise-area.sfe06303'), t('noise-area.s08b595c'), () => this.activate('noise')));
+    const area = this.area(); if (!area) { host.append(hint(t('noise-area.sbbb578e'))); return; }
+    const title = document.createElement('h3'); title.textContent = this.event ? NOISE_TRACKS.find(track => track[0] === this.event.type)[1] + t('noise-area.sc76dce1') + this.selected : t('noise-area.s3a2d2c2') + this.selected; host.append(title);
+    this.field(host, t('noise-area.sb113df7'), noiseLayerId(area), (item,value) => ({ ...item, layerId:value }), { kind:'text', choices:noiseLayers(this.chart).map(layer=>[layer.id,layer.name]) });
     const modifyEvent = change => item => { const event = item[this.event.type][this.event.index]; change(event); return item; };
     if (this.event) {
       const { type, index } = this.event; const event = area[type][index];
-      for (const [field, label] of [['startTime', '开始拍'], ['endTime', '结束拍']]) this.field(host, label, event[field], (item, value) => modifyEvent(entry => { entry[field] = value; })(item), { kind: 'beat' });
-      if (type === 'activeIntervals') this.field(host, '预备闪烁时长（秒）', readyFlashValue(event.readyFlash), (item, value) => modifyEvent(entry => { entry.readyFlash = Math.max(0, Math.round(value * 1000) / 1000); })(item), { kind: 'duration', clear: true });
+      for (const [field, label] of [['startTime', t('noise-area.s087c451')], ['endTime', t('noise-area.sc4d3fa4')]]) this.field(host, label, event[field], (item, value) => modifyEvent(entry => { entry[field] = value; })(item), { kind: 'beat' });
+      if (type === 'activeIntervals') this.field(host, t('noise-area.s207b20f'), readyFlashValue(event.readyFlash), (item, value) => modifyEvent(entry => { entry.readyFlash = Math.max(0, Math.round(value * 1000) / 1000); })(item), { kind: 'duration', clear: true });
       else {
-        for (const [field, label] of [['start', '首值'], ['end', '尾值']]) this.field(host, label, event[field], (item, value) => modifyEvent(entry => { entry[field] = value; if (entry.inst) entry[field === 'start' ? 'end' : 'start'] = value; })(item), { step: type.startsWith('scale') ? 0.1 : 1, sample: { type, index, field } });
-        if (noiseHasAnchor(type)) for (const axis of ['x', 'y']) this.field(host, '锚点 ' + axis.toUpperCase(), event.anchor[axis], (item, value) => modifyEvent(entry => { entry.anchor[axis] = value; })(item), { sample: { type, index, field: 'anchor' } });
-        this.field(host, '钩定（首尾同步）', event.inst, (item, value) => modifyEvent(entry => { entry.inst = value ? 1 : 0; if (value) entry.end = entry.start; })(item), { kind: 'checkbox' });
-        this.field(host, '绑定组', event.linkgroup ?? 0, (item, value) => modifyEvent(entry => { entry.linkgroup = Math.max(0, Math.round(value)); })(item));
-        if (event.linkgroup > 0) host.append(button('选中绑定组 ' + event.linkgroup, '选中本噪域中同组的变换事件', () => { this.selection = new Set(NOISE_TRACKS.slice(1).flatMap(([track]) => (this.area()[track] ?? []).flatMap((entry, position) => entry.linkgroup === event.linkgroup ? [track + ':' + position] : []))); this.render(); this.invalidate(); }));
-        this.field(host, '缓动', event.easingType ?? 1, (item, value) => modifyEvent(entry => { entry.easingType = value; })(item), { choices: EASING_NAMES.map((name, position) => [position + 1, (position + 1) + ' · ' + name]) });
+        for (const [field, label] of [['start', t('noise-area.sdc6ff65')], ['end', t('noise-area.sa3dd3ca')]]) this.field(host, label, event[field], (item, value) => modifyEvent(entry => { entry[field] = value; if (entry.inst) entry[field === 'start' ? 'end' : 'start'] = value; })(item), { step: type.startsWith('scale') ? 0.1 : 1, sample: { type, index, field } });
+        if (noiseHasAnchor(type)) for (const axis of ['x', 'y']) this.field(host, t('noise-area.sbbcf4ca') + axis.toUpperCase(), event.anchor[axis], (item, value) => modifyEvent(entry => { entry.anchor[axis] = value; })(item), { sample: { type, index, field: 'anchor' } });
+        this.field(host, t('noise-area.s7787450'), event.inst, (item, value) => modifyEvent(entry => { entry.inst = value ? 1 : 0; if (value) entry.end = entry.start; })(item), { kind: 'checkbox' });
+        this.field(host, t('noise-area.s7941eab'), event.linkgroup ?? 0, (item, value) => modifyEvent(entry => { entry.linkgroup = Math.max(0, Math.round(value)); })(item));
+        if (event.linkgroup > 0) host.append(button(t('noise-area.s6e49702') + event.linkgroup, t('noise-area.sbe454d5'), () => { this.selection = new Set(NOISE_TRACKS.slice(1).flatMap(([track]) => (this.area()[track] ?? []).flatMap((entry, position) => entry.linkgroup === event.linkgroup ? [track + ':' + position] : []))); this.render(); this.invalidate(); }));
+        this.field(host, t('noise-area.s727b7cd'), event.easingType ?? 1, (item, value) => modifyEvent(entry => { entry.easingType = value; })(item), { choices: EASING_NAMES.map((name, position) => [position + 1, (position + 1) + ' · ' + name]) });
         host.append(createEasingPicker(event.easingType ?? 1, value => this.edit(modifyEvent(entry => { entry.easingType = value; })), this.easingState).element);
-        for (const [field, label] of [['easingLeft', '缓动左边界'], ['easingRight', '缓动右边界']]) this.field(host, label, event[field] ?? (field === 'easingLeft' ? 0 : 1), (item, value) => modifyEvent(entry => { entry[field] = value; })(item), { step: 0.05 });
+        for (const [field, label] of [['easingLeft', t('noise-area.s2fbff0e')], ['easingRight', t('noise-area.sb38574e')]]) this.field(host, label, event[field] ?? (field === 'easingLeft' ? 0 : 1), (item, value) => modifyEvent(entry => { entry[field] = value; })(item), { step: 0.05 });
         this.field(host, 'Bezier', event.bezier, (item, value) => modifyEvent(entry => { entry.bezier = value ? 1 : 0; })(item), { kind: 'checkbox' });
-        for (const [position, label] of ['控制点 1 X', '控制点 1 Y', '控制点 2 X', '控制点 2 Y'].entries()) this.field(host, label, (event.bezierPoints ?? [0, 0, 1, 1])[position], (item, value) => modifyEvent(entry => { entry.bezierPoints ??= [0, 0, 1, 1]; entry.bezierPoints[position] = value; })(item), { step: 0.05 });
+        for (const [position, label] of [t('noise-area.scc6b884'), t('noise-area.s2382dea'), t('noise-area.s8b368a9'), t('noise-area.se34ffb4')].entries()) this.field(host, label, (event.bezierPoints ?? [0, 0, 1, 1])[position], (item, value) => modifyEvent(entry => { entry.bezierPoints ??= [0, 0, 1, 1]; entry.bezierPoints[position] = value; })(item), { step: 0.05 });
       }
-      host.append(button('噪域基础属性', '查看初始矩形与生命周期', () => this.select(this.selected)));
+      host.append(button(t('noise-area.s6e88590'), t('noise-area.s9f829d4'), () => this.select(this.selected)));
     } else {
-      this.field(host, '名称', area.Name ?? '', (item, value) => ({ ...item, Name: value }), { kind: 'text' });
-      for (const [field, label] of [['appearTime', '出现拍'], ['disappearTime', '消失拍']]) this.field(host, label, area[field], (item, value) => ({ ...item, [field]: value }), { kind: 'beat' });
-      for (const [field, label] of [['bottomLeft', '左下'], ['topRight', '右上']]) for (const axis of ['x', 'y']) this.field(host, label + ' ' + axis.toUpperCase(), area[field][axis], (item, value) => ({ ...item, [field]: { ...item[field], [axis]: value } }), { sample: { field } });
-      this.field(host, '反转覆盖', area.isInvert, (item, value) => ({ ...item, isInvert: value }), { kind: 'checkbox' });
-      host.append(hint('调整生命周期首尾不会缩放或裁剪内部事件。整体移动会平移所有内部时间；所有内部时间仍为全谱绝对拍数。'));
+      this.field(host, t('noise-area.s1be7ae4'), area.Name ?? '', (item, value) => ({ ...item, Name: value }), { kind: 'text' });
+      for (const [field, label] of [['appearTime', t('noise-area.s1bf3592')], ['disappearTime', t('noise-area.s7266ac6')]]) this.field(host, label, area[field], (item, value) => ({ ...item, [field]: value }), { kind: 'beat' });
+      for (const [field, label] of [['bottomLeft', t('noise-area.s3f40468')], ['topRight', t('noise-area.s34f14b0')]]) for (const axis of ['x', 'y']) this.field(host, label + ' ' + axis.toUpperCase(), area[field][axis], (item, value) => ({ ...item, [field]: { ...item[field], [axis]: value } }), { sample: { field } });
+      this.field(host, t('noise-area.s8bbb130'), area.isInvert, (item, value) => ({ ...item, isInvert: value }), { kind: 'checkbox' });
+      host.append(hint(t('noise-area.s19ab647')));
     }
-    host.append(button('删除选中对象', '删除，可撤销', () => this.remove()));
+    host.append(button(t('noise-area.s0241408'), t('noise-area.sfe9d861'), () => this.remove()));
   }
   beginSample(target) {
     this.flush(); this.pause(); const area = this.area(); if (!area) return;
@@ -451,7 +474,7 @@ export class NoiseAreaEditor {
     for (const { renderer, original } of this.sampleZoom ?? []) renderer.viewDivisor = original;
     this.sampleZoom = null;
     const chart = this.draftChart; this.sampleMode = null; this.sampleDrag = null; this.draftChart = null; this.syncChrome();
-    if (apply && chart) { try { this.commit('预览拖动取样', chart); } catch (error) { this.report(error); } }
+    if (apply && chart) { try { this.commit(t('noise-area.seaab4c2'), chart); } catch (error) { this.report(error); } }
     this.render(); this.invalidate();
   }
   fitSampleView() {
@@ -511,10 +534,10 @@ export class NoiseAreaEditor {
     const sample = sampleEditingArea(area, this.context.tempo, this.sampleSeconds, this.sampleMode); const points = sample.points.map(view.screen);
     context.strokeStyle = '#67efa4'; context.lineWidth = 2; context.beginPath(); points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y)); context.closePath(); context.stroke();
     const anchor = this.sampleMode.type && noiseHasAnchor(this.sampleMode.type) ? area[this.sampleMode.type][this.sampleMode.index].anchor : null;
-    if (anchor) { const point = view.screen(anchor); context.strokeStyle = '#f0ca67'; context.beginPath(); context.moveTo(point.x - 9, point.y); context.lineTo(point.x + 9, point.y); context.moveTo(point.x, point.y - 9); context.lineTo(point.x, point.y + 9); context.stroke(); context.fillStyle = '#f0ca67'; context.fillText('锚点', point.x + 12, point.y); }
+    if (anchor) { const point = view.screen(anchor); context.strokeStyle = '#f0ca67'; context.beginPath(); context.moveTo(point.x - 9, point.y); context.lineTo(point.x + 9, point.y); context.moveTo(point.x, point.y - 9); context.lineTo(point.x, point.y + 9); context.stroke(); context.fillStyle = '#f0ca67'; context.fillText(t('noise-area.sc7d0648'), point.x + 12, point.y); }
     const handle = view.screen(noiseSampleHandle(area, this.context.tempo, this.sampleSeconds, this.sampleMode)); context.fillStyle = '#5cffa1'; context.beginPath(); context.arc(handle.x, handle.y, 9, 0, Math.PI * 2); context.fill(); context.strokeStyle = '#152a1d'; context.stroke();
-    context.fillStyle = '#c8ffdf'; context.font = '14px sans-serif'; context.fillText('拖动绿色控制点 · 当前取样拍 ' + round(this.context.tempo.beat(this.sampleSeconds)), 18, height - 20);
-    if (handle.x < 0 || handle.x > width || handle.y < 0 || handle.y > height) context.fillText('控制点在视野外：增大工具栏“缩放”以扩大可见范围', 18, height - 42);
+    context.fillStyle = '#c8ffdf'; context.font = '14px sans-serif'; context.fillText(t('noise-area.s7872d97') + round(this.context.tempo.beat(this.sampleSeconds)), 18, height - 20);
+    if (handle.x < 0 || handle.x > width || handle.y < 0 || handle.y > height) context.fillText(t('noise-area.s3d7275e'), 18, height - 42);
   }
   draw() {
     this.syncChrome(); if (!this.active || this.context.previewVisible || this.sampleMode) return;
@@ -558,8 +581,8 @@ export class NoiseAreaEditor {
       context.fillStyle = color; if (!seamless || hovered) { context.fillRect(x, head - 2, entryWidth, 4); context.fillRect(x, tail - 2, entryWidth, 4); }
       if (hovered && this.hover.kind !== 'move') { context.fillStyle = '#fff1d2'; context.fillRect(x - 2, (this.hover.kind === 'start' ? head : tail) - 4, entryWidth + 4, 8); }
       context.font = '12px sans-serif'; context.textAlign = 'center';
-      if (!type) context.fillText((entry.Name || '噪域 ' + index) + (entry.isInvert ? ' ⊕' : ''), x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, Math.min(height - 12, top + 18)), Math.max(1, entryWidth - 4));
-      else if (type === 'activeIntervals') context.fillText(readyFlashValue(entry.readyFlash) > 0 ? `预闪 ${durationText(readyFlashValue(entry.readyFlash))}s` : '无预闪', x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, top + 18), Math.max(1, entryWidth - 4));
+      if (!type) context.fillText((entry.Name || t('noise-area.s3a2d2c2') + index) + (entry.isInvert ? ' ⊕' : ''), x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, Math.min(height - 12, top + 18)), Math.max(1, entryWidth - 4));
+      else if (type === 'activeIntervals') context.fillText(readyFlashValue(entry.readyFlash) > 0 ? t('noise-area.se62118e', { p0: durationText(readyFlashValue(entry.readyFlash)) }) : t('noise-area.s3c7509f'), x + entryWidth / 2, Math.max(HEADER_HEIGHT + 16, top + 18), Math.max(1, entryWidth - 4));
       else if (timeline.drawEventCurves !== false && layout.eventWidth >= (timeline.eventCurveThreshold ?? 24)) {
         drawEventCurve(context, entry, range, { x, y: Math.max(HEADER_HEIGHT, top), width: entryWidth, height: Math.max(2, Math.min(height, bottom) - Math.max(HEADER_HEIGHT, top)) }, head, tail);
       }
@@ -610,10 +633,10 @@ export class NoiseAreaEditor {
     if (this.drag?.kind === 'rectangle') { const start = this.drag.start; const current = this.cursor; context.save(); context.lineWidth = 1; context.fillStyle = '#ffcc4430'; context.strokeStyle = '#ffdd77'; const top = this.y(start.rawBeat); const deltaY = this.y(current.rawBeat) - top; context.fillRect(start.x, top, current.x - start.x, deltaY); context.strokeRect(start.x, top, current.x - start.x, deltaY); context.restore(); }
     if (this.drag?.kind === 'stroke' && this.drag.moved) { context.save(); context.lineWidth = 1; context.strokeStyle = '#80ffff'; context.beginPath(); this.drag.points.forEach((point, index) => index ? context.lineTo(point.x, this.y(point.rawBeat)) : context.moveTo(point.x, this.y(point.rawBeat))); context.stroke(); context.restore(); }
     this.drawOwner(context, layout);
-    const owner = this.area() ? `#${this.selected} ${this.area().Name || '未命名噪域'}` : '未指定噪域';
-    const description = `噪域数量: ${this.areas().length}；当前右侧内部事件：${owner}`;
+    const owner = this.area() ? `#${this.selected} ${this.area().Name || '未命名噪域'}` : t('noise-area.sd7b34fd');
+    const description = t('noise-area.se2f1ca6', { p0: this.areas().length, p1: owner });
     if (description !== this.ariaDescription) { this.canvas.setAttribute('aria-description', description); this.ariaDescription = description; }
-    context.strokeStyle = timeline.judgementColor ?? '#ffffff'; context.lineWidth = 2; context.beginPath(); context.moveTo(0, this.y(timeline.origin)); context.lineTo(width, this.y(timeline.origin)); context.stroke();
+    drawEditorJudgement(context, [{ left: 0, right: width, y: this.y(timeline.origin) }], timeline.judgementColor ?? '#ffffff', editorJudgementWidth(timeline, timeline.gridReferenceWidth ?? width), timeline.judgementAlpha);
   }
   eventGroups(events) {
     return eventDisplayIndex(this, events, this.draftChart ?? this.context.session?.chart).groups;
@@ -660,7 +683,7 @@ export class NoiseAreaEditor {
     context.save();
     context.beginPath(); context.rect(0, HEADER_HEIGHT, layout.split, layout.height - HEADER_HEIGHT); context.clip();
     const vertical = above ? HEADER_HEIGHT + 19 : below ? layout.height - 12 : Math.max(HEADER_HEIGHT + 18, Math.min(layout.height - 14, top + 36));
-    const label = `${above ? '▲ ' : below ? '▼ ' : '→ '}#${this.selected} ${area.Name || '噪域'}`;
+    const label = t('noise-area.s6eabf6d', { p0: above ? '▲ ' : below ? '▼ ' : '→ ', p1: this.selected, p2: area.Name || t('noise-area.s81b3bb2') });
     context.font = '12px sans-serif'; context.textAlign = 'left'; const textWidth = Math.min(layout.split - 12, context.measureText(label).width + 10); const left = Math.max(6, Math.min(layout.split - textWidth - 6, horizontal + AREA_BAR_WIDTH / 2 + 7));
     context.fillStyle = '#242628ed'; context.fillRect(left - 3, vertical - 14, textWidth, 19); context.fillStyle = '#f5f5f5'; context.fillText(label, left, vertical, textWidth - 6); context.restore();
   }
@@ -674,8 +697,8 @@ export class NoiseAreaEditor {
         for (const interval of intervals) { const previous = merged.at(-1); if (previous && interval[0] <= previous[1]) previous[1] = Math.max(previous[1], interval[1]); else merged.push(interval); }
         return merged;
       });
-      const appear = tempo.seconds(area.appearTime); const disappear = tempo.seconds(area.disappearTime);
-      const intervals = (area.activeIntervals ?? []).map(interval => ({ start: Math.max(appear, tempo.seconds(interval.startTime)), end: Math.min(disappear, tempo.seconds(interval.endTime)), readyFlash: readyFlashValue(interval.readyFlash) })).filter(interval => interval.end > interval.start).sort((first, second) => first.start - second.start);
+      const appear = tempo.seconds(area.appearTime);
+      const intervals = noiseActivationIntervals(area, tempo);
       const flashes = intervals.flatMap((interval, index) => {
         const start = Math.max(appear, intervals[index - 1]?.end ?? -Infinity, interval.start - interval.readyFlash);
         return interval.readyFlash > 0 && start < interval.start ? [[tempo.beat(start), tempo.beat(interval.start)]] : [];

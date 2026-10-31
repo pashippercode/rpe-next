@@ -1,5 +1,6 @@
 import { NOTE_SKIN_IMAGES, holdSkinLayout, noteSkinColor, noteSkinFrame } from '../core/note-skin.mjs';
 import { hitParticles } from '../core/editor-display.mjs';
+import { t } from '../i18n.mjs';
 
 const names = {1:'click',2:'hold',3:'flick',4:'drag'};
 const dimensions = image => ({width:image.naturalWidth??image.width,height:image.naturalHeight??image.height});
@@ -19,7 +20,7 @@ export class ResourceNoteSkin {
     const images=new Map(await Promise.all(NOTE_SKIN_IMAGES.map(async name=>{
       const url=URL.createObjectURL(new Blob([record.files.get(name)],{type:'image/png'}));const picture=new Image();
       try {picture.src=url;await picture.decode();return [name,picture];}
-      catch {throw new Error('无法解码音符皮肤图片：'+name);}
+      catch {throw new Error(t('resource-note-skin.s79f19c3')+name);}
       finally {URL.revokeObjectURL(url);}
     })));
     return new ResourceNoteSkin(record,images,tintSource);
@@ -32,6 +33,11 @@ export class ResourceNoteSkin {
   }
   source(name,color) {const picture=this.images.get(name);return this.tintSource(`${this.id}:${name}`,picture,tint(color));}
   get hitLifetime() {return this.info.hitFxDuration;}
+  get hitBatchCompatible() {return this.drawHit === nativeHitDraw;}
+  hitRadius(size) {
+    const sheet = dimensions(this.images.get('hit_fx.png')), width = size * this.info.hitFxScale, height = width * sheet.height / this.info.hitFx[1] / (sheet.width / this.info.hitFx[0]);
+    return Math.max(Math.hypot(width, height) / 2, this.info.hideParticles ? 0 : width / 1.4 * 1.175);
+  }
   get perfectColor() {return noteSkinColor(this.info.colorPerfect);}
   noteImage(type,highlight=false){return this.images.get(names[type]+(highlight?'_mh':'')+'.png');}
   noteScale(highlight=false){return highlight?this.highlightScale:1;}
@@ -100,3 +106,5 @@ export class ResourceNoteSkin {
     return true;
   }
 }
+
+const nativeHitDraw = ResourceNoteSkin.prototype.drawHit;
