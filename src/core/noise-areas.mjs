@@ -103,6 +103,11 @@ export class NoiseAreaRuntime {
     const track = this.tracks[type]; const index = upperBound(track.events, seconds + TIME_EPSILON, entry => entry.start) - 1; const entry = track.events[index];
     return { value: entry ? track.sample(entry, seconds) : fallback, event: entry?.event };
   }
+  accumulatePoint(type, point, value, event) {
+    if (!event) return point;
+    const previous = applyTransform(this.prefixes[type].get(event) ?? identity(), point);
+    return applyTransform(relativeTransform(type, event.transformStart ?? event.start, value, event.anchor ?? this.center), previous);
+  }
   sample(seconds, overrides = sampleOverrides.get(this.area) ?? {}) {
     const activeIndex = upperBound(this.activations, seconds + TIME_EPSILON, interval => interval.start) - 1;
     const active = this.activations[activeIndex]; const next = this.intervals[this.activations === this.intervals ? activeIndex + 1 : upperBound(this.intervals, seconds + TIME_EPSILON, interval => interval.start)];
@@ -112,20 +117,32 @@ export class NoiseAreaRuntime {
     const phase = next?.readyFlash > 0 ? Math.max(0, Math.min(1, (seconds - next.start + next.readyFlash) / next.readyFlash)) : 0;
     const activationMix = state === 'active' ? 1 : state === 'ready' ? (1 + Math.cos(phase * Math.PI * 6)) / 2 : 0;
     const alpha = NOISE_AREA_COLORS.appearance[3] + (NOISE_AREA_COLORS.active[3] - NOISE_AREA_COLORS.appearance[3]) * activationMix;
-    const values = Object.fromEntries(NOISE_TRACKS.slice(1).map(([type]) => [type, overrides[type] ?? this.track(type, seconds, type.startsWith('scale') ? 1 : type === 'moveXEvents' ? this.center.x : type === 'moveYEvents' ? this.center.y : 0)]));
+    const values = {
+      moveXEvents: overrides.moveXEvents ?? this.track('moveXEvents', seconds, this.center.x),
+      moveYEvents: overrides.moveYEvents ?? this.track('moveYEvents', seconds, this.center.y),
+      rotateEvents: overrides.rotateEvents ?? this.track('rotateEvents', seconds, 0),
+      scaleXEvents: overrides.scaleXEvents ?? this.track('scaleXEvents', seconds, 1),
+      scaleYEvents: overrides.scaleYEvents ?? this.track('scaleYEvents', seconds, 1),
+    };
     const move = { x: values.moveXEvents.value - this.center.x, y: values.moveYEvents.value - this.center.y };
     const rotation = values.rotateEvents.value * Math.PI / 180;
     const scaleX = values.scaleXEvents.value; const scaleY = values.scaleYEvents.value;
     const anchorX = values.scaleXEvents.event?.anchor ?? this.center; const anchorY = values.scaleYEvents.event?.anchor ?? this.center; const anchorR = values.rotateEvents.event?.anchor ?? this.center;
-    const accumulate = (type, point) => {
-      const { event, value } = values[type]; if (!event) return point;
-      const previous = applyTransform(this.prefixes[type].get(event) ?? identity(), point);
-      return applyTransform(relativeTransform(type, event.transformStart ?? event.start, value, event.anchor ?? this.center), previous);
+    const center = this.accumulatePoint('rotateEvents', this.accumulatePoint('scaleYEvents', this.accumulatePoint('scaleXEvents', this.center, values.scaleXEvents.value, values.scaleXEvents.event), values.scaleYEvents.value, values.scaleYEvents.event), values.rotateEvents.value, values.rotateEvents.event);
+    const cosine = Math.cos(rotation); const sine = Math.sin(rotation);
+    const rotate = point => ({ x: cosine * point.x + sine * point.y, y: -sine * point.x + cosine * point.y });
+    const transform = point => {
+      const scaledX = scaleX * (point.x - this.center.x); const scaledY = scaleY * (point.y - this.center.y);
+      const rotatedX = cosine * scaledX + sine * scaledY; const rotatedY = -sine * scaledX + cosine * scaledY;
+      return { x: center.x + rotatedX + move.x, y: center.y + rotatedY + move.y };
     };
-    const rotate = point => ({ x: Math.cos(rotation) * point.x + Math.sin(rotation) * point.y, y: -Math.sin(rotation) * point.x + Math.cos(rotation) * point.y });
-    const center = accumulate('rotateEvents', accumulate('scaleYEvents', accumulate('scaleXEvents', this.center)));
-    const transform = point => { const rotated = rotate({ x: scaleX * (point.x - this.center.x), y: scaleY * (point.y - this.center.y) }); return { x: center.x + rotated.x + move.x, y: center.y + rotated.y + move.y }; };
-    return { state, alpha, activationMix, points: this.corners.map(transform), center: transform(this.center), values, move, rotation, scaleX, scaleY, anchorX, anchorY, anchorR, transform, rotate };
+    const points = new Array(this.corners.length);
+    for (let index = 0; index < this.corners.length; index++) {
+      const corner = this.corners[index];
+      const scaledX = scaleX * (corner.x - this.center.x); const scaledY = scaleY * (corner.y - this.center.y);
+      points[index] = { x: center.x + (cosine * scaledX + sine * scaledY) + move.x, y: center.y + (-sine * scaledX + cosine * scaledY) + move.y };
+    }
+    return { state, alpha, activationMix, points, center: transform(this.center), values, move, rotation, scaleX, scaleY, anchorX, anchorY, anchorR, transform, rotate };
   }
 }
 const runtimeCache = new WeakMap();

@@ -43,12 +43,31 @@ const curves = [
   progress => progress === 0 || progress === 1 ? progress : progress < 0.5 ? -(2 ** (20 * progress - 10) * Math.sin((20 * progress - 11.125) * elasticInOut)) / 2 : 2 ** (-20 * progress + 10) * Math.sin((20 * progress - 11.125) * elasticInOut) / 2 + 1,
 ];
 
+const unitNormalizations = [];
+const arbitraryNormalizations = new Map();
 export function easing(progress, type = 1, left = 0, right = 1) {
   const curve = curves[type - 1] ?? curves[0];
-  const base = curve(left);
-  const range = curve(right) - base;
-  if (Math.abs(range) < 1e-12) return progress;
-  return (curve(left + (right - left) * progress) - base) / range;
+  let normalization;
+  if (left === 0 && right === 1) {
+    normalization = unitNormalizations[type];
+    if (normalization === undefined) {
+      const base = curve(0);
+      const range = curve(1) - base;
+      normalization = unitNormalizations[type] = Math.abs(range) < 1e-12 ? null : { base, range };
+    }
+  } else {
+    const key = type + '|' + left + '|' + right;
+    normalization = arbitraryNormalizations.get(key);
+    if (normalization === undefined) {
+      const base = curve(left);
+      const range = curve(right) - base;
+      normalization = Math.abs(range) < 1e-12 ? null : { base, range };
+      if (arbitraryNormalizations.size > 4096) arbitraryNormalizations.clear();
+      arbitraryNormalizations.set(key, normalization);
+    }
+  }
+  if (normalization === null) return progress;
+  return (curve(left + (right - left) * progress) - normalization.base) / normalization.range;
 }
 
 export function bezier(progress, points) {

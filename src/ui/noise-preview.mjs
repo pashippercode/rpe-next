@@ -17,9 +17,17 @@ function guideFontState() {
 }
 function polygon(points, width, height, scale) {
   const path = new Path2D();
-  const winding = points.reduce((sum, point, index) => { const next = points[(index + 1) % points.length]; return sum + point.x * next.y - next.x * point.y; }, 0);
-  const ordered = winding < 0 ? [...points].reverse() : points;
-  ordered.forEach((point, index) => { const horizontal = width / 2 + point.x * scale; const vertical = height / 2 - point.y * scale; if (index) path.lineTo(horizontal, vertical); else path.moveTo(horizontal, vertical); });
+  let winding = 0;
+  for (let index = 0; index < points.length; index++) {
+    const point = points[index]; const next = points[(index + 1) % points.length];
+    winding += point.x * next.y - next.x * point.y;
+  }
+  const last = points.length - 1;
+  for (let step = 0; step < points.length; step++) {
+    const point = points[winding < 0 ? last - step : step];
+    const horizontal = width / 2 + point.x * scale; const vertical = height / 2 - point.y * scale;
+    if (step) path.lineTo(horizontal, vertical); else path.moveTo(horizontal, vertical);
+  }
   path.closePath(); return path;
 }
 
